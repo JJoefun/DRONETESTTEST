@@ -213,7 +213,7 @@
     <p><b>建議用檔案</b>：另一台裝置按「💾 下載進度檔」，用 LINE 以<b>檔案</b>傳給自己（不要貼文字），在這裡選擇該檔案。檔案內容不會被通訊軟體改字。</p>
     <input type="file" id="port-file" accept=".json,.txt" onchange="importFile(this.files[0])">
     <p style="margin-top:10px">或貼上匯出的整段文字：</p>
-    <textarea id="port-text" placeholder="DRONESRS1:eyJ…"></textarea>
+    <textarea id="port-text" placeholder="eyJ…（貼上整段匯出文字）"></textarea>
     <div class="row">
       <button class="btn" onclick="importProgress()">合併匯入</button>
       <button class="btn ghost" onclick="toggleImportPanel()">取消</button>
@@ -521,17 +521,25 @@ function portMsg(t, cls){
 /* 匯出：base64(UTF-8 JSON)，前綴魔術字防貼錯 */
 function encodeStore(){
   const json=JSON.stringify(store);
-  return PORT_MAGIC + btoa(String.fromCharCode(...new TextEncoder().encode(json)));
+  return btoa(String.fromCharCode(...new TextEncoder().encode(json)));
 }
 function decodeStore(text){
-  text=text.trim();
-  // 前綴不分大小寫（LINE/輸入法可能自動改首字大小寫），並容忍前後雜訊空白換行
-  const m=text.match(/dronesrs1:/i);
-  if(!m) throw new Error("格式不對：找不到 "+PORT_MAGIC+" 開頭");
-  let payload=text.slice(m.index+PORT_MAGIC.length).replace(/\s+/g,"");
-  const obj=JSON.parse(new TextDecoder().decode(
-    Uint8Array.from(atob(payload), c=>c.charCodeAt(0))));
-  if(typeof obj!=="object"||Array.isArray(obj)) throw new Error("內容不是進度資料");
+  let payload=text.trim();
+  // 相容舊格式：若含 dronesrs1: 前綴（不分大小寫）則去掉
+  const m=payload.match(/dronesrs1:/i);
+  if(m) payload=payload.slice(m.index+PORT_MAGIC.length);
+  payload=payload.replace(/\s+/g,"");
+  if(!payload) throw new Error("內容是空的");
+  let obj;
+  try{
+    obj=JSON.parse(new TextDecoder().decode(
+      Uint8Array.from(atob(payload), c=>c.charCodeAt(0))));
+  }catch(e){ throw new Error("不是有效的進度文字"); }
+  // 用資料結構驗證：物件、且每筆值都要有 SRS 欄位
+  if(typeof obj!=="object"||obj===null||Array.isArray(obj)) throw new Error("內容不是進度資料");
+  const vals=Object.values(obj);
+  if(vals.length && !vals.every(v=>v&&typeof v==="object"&&("due" in v||"ef" in v)))
+    throw new Error("內容不是進度資料");
   return obj;
 }
 async function exportProgress(){
