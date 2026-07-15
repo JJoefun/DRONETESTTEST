@@ -374,12 +374,7 @@ function answer(letter){
     if(l===correct){ b.classList.add("correct"); addMk(b,"✓ 正解"); }
     if(l===letter && !ok){ b.classList.add("wrong"); addMk(b,"✕ 你選的"); }
   });
-  const rec=[];
-  if(s.wrong>0) rec.push(`答錯 ${s.wrong} 次`);
-  if(s.guess>0) rec.push(`猜過 ${s.guess} 次`);
-  if(s.lapses>0) rec.push(`重學 ${s.lapses} 次`);
-  const recHtml = rec.length ? `<div class="rec">📌 這題累積紀錄：${rec.join("　·　")}　（已在錯題本）</div>` : "";
-  const expHtml=`<div class="exp"><b>解析</b>　${esc(cur.exp)}</div>`+recHtml;
+  const expHtml=`<div class="exp"><b>解析</b>　${esc(cur.exp)}</div><div id="recHolder"></div>`;
   const grades=`
     <div class="grades">
       <button class="grade g-again" onclick="grade('again')">再一次<small>&lt;10分</small></button>
@@ -389,12 +384,40 @@ function answer(letter){
     </div>
     <div class="hint">鍵盤：1 再一次 · 2 困難 · 3 良好 · 4 簡單${ok?"":"　（答錯建議「再一次」）"}</div>`;
   document.getElementById("post").innerHTML=expHtml+grades;
+  renderRec();
+  const gb=document.getElementById("guessBtn");
+  if(gb) gb.innerHTML = guessFlag ? "🤔 已標記：這題是猜的（再點取消）" : "🤔 其實這題我是猜的";
   refreshHUD();
 }
 function toggleGuess(){
-  if(answered) return;
   guessFlag=!guessFlag;
-  document.getElementById("guessBtn").setAttribute("aria-pressed", guessFlag);
+  const btn=document.getElementById("guessBtn");
+  if(btn){
+    btn.setAttribute("aria-pressed", guessFlag);
+    btn.innerHTML = answered
+      ? (guessFlag ? "🤔 已標記：這題是猜的（再點取消）" : "🤔 其實這題我是猜的")
+      : (guessFlag ? "🤔 已標記：不確定 / 用猜的" : "🤔 這題我不確定 / 用猜的");
+  }
+  if(answered){
+    // 作答後才標記/取消，直接回寫紀錄
+    const s=store[cur.id];
+    if(!s) return;
+    s.guess = Math.max(0, (s.guess||0) + (guessFlag? 1 : -1));
+    store[cur.id]=s; save();
+    renderRec();
+    refreshHUD();
+  }
+}
+function renderRec(){
+  const holder=document.getElementById("recHolder");
+  if(!holder) return;
+  const s=store[cur.id]||{};
+  const rec=[];
+  if(s.wrong>0) rec.push(`答錯 ${s.wrong} 次`);
+  if(s.guess>0) rec.push(`猜過 ${s.guess} 次`);
+  if(s.lapses>0) rec.push(`重學 ${s.lapses} 次`);
+  holder.innerHTML = rec.length
+    ? `<div class="rec">📌 這題累積紀錄：${rec.join("　·　")}　（已在錯題本）</div>` : "";
 }
 function addMk(b,txt){ const s=document.createElement("span"); s.className="mk"; s.textContent=txt; b.appendChild(s); }
 function prevIv(g){
