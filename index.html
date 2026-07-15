@@ -518,25 +518,110 @@ function portMsg(t, cls){
   el.textContent=t; el.className="pmsg "+(cls||"");
   if(t) setTimeout(()=>{ if(el.textContent===t){ el.textContent=""; el.className="pmsg"; } }, 6000);
 }
-/* 匯出：base64(UTF-8 JSON)，前綴魔術字防貼錯 */
-function encodeStore(){
-  const json=JSON.stringify(store);
-  return btoa(String.fromCharCode(...new TextEncoder().encode(json)));
+/* ---- 精簡欄位（縮短文字）：每卡存成陣列；時間量化（due→天、lastSeen/lastWrong→分）---- */
+const PACK_FIELDS=["ef","iv","reps","due","lapses","wrong","guess","lastSeen","seen","relearn","lastWrong"];
+const MIN=60000, DAYMS=86400000;
+function packStore(s){          // v3：量化時間
+  const o={};
+  for(const [k,v] of Object.entries(s)){
+    o[k]=PACK_FIELDS.map(f=>{
+      let x=v[f];
+      if(x===undefined) return null;
+      if(x===true) return 1;
+      if(x===false) return 0;
+      if(f==="due") return Math.round(x/DAYMS);
+      if(f==="lastSeen"||f==="lastWrong") return Math.round(x/MIN);
+      if(f==="ef") return Math.round(x*100)/100;
+      return x;
+    });
+  }
+  return o;
 }
-function decodeStore(text){
+function unpackStore(o, quantized){
+  const s={};
+  for(const [k,arr] of Object.entries(o)){
+    if(!Array.isArray(arr)) return null;           // 不是打包格式
+    const v={};
+    PACK_FIELDS.forEach((f,i)=>{
+      let x=arr[i];
+      if(x===null||x===undefined) return;
+      if(f==="seen"||f==="relearn"){ v[f]=!!x; return; }
+      if(quantized){
+        if(f==="due") x=x*DAYMS;
+        else if(f==="lastSeen"||f==="lastWrong") x=x*MIN;
+      }
+      v[f]=x;
+    });
+    s[k]=v;
+  }
+  return s;
+}
+function b64FromBytes(bytes){
+  let bin=""; const CH=0x8000;
+  for(let i=0;i<bytes.length;i+=CH) bin+=String.fromCharCode(...bytes.subarray(i,i+CH));
+  return btoa(bin);
+}
+function bytesFromB64(b64){
+  const bin=atob(b64);
+  return Uint8Array.from(bin, c=>c.charCodeAt(0));
+}
+async function deflateBytes(bytes){
+  const cs=new CompressionStream("deflate-raw");
+  const buf=await new Response(new Blob([bytes]).stream().pipeThrough(cs)).arrayBuffer();
+  return new Uint8Array(buf);
+}
+async function inflateBytes(bytes){
+  const ds=new DecompressionStream("deflate-raw");
+  const buf=await new Response(new Blob([bytes]).stream().pipeThrough(ds)).arrayBuffer();
+  return new Uint8Array(buf);
+}
+/* 匯出：v2 = "2." + base64(deflate(精簡JSON))；無壓縮API則 "1." + base64(精簡JSON) */
+async function encodeStore(){
+  const bytes=new TextEncoder().encode(JSON.stringify(packStore(store)));
+  if(typeof CompressionStream!=="undefined"){
+    try{ return "3."+b64FromBytes(await deflateBytes(bytes)); }catch(e){}
+  }
+  return "1."+b64FromBytes(bytes);   // v1＝未壓縮但同樣量化打包
+}
+const TRUNC_MSG="文字不完整——LINE 對長訊息會截斷，請改用「💾 下載進度檔」以檔案傳送";
+async function decodeStore(text){
   let payload=text.trim();
-  // 相容舊格式：若含 dronesrs1: 前綴（不分大小寫）則去掉
-  const m=payload.match(/dronesrs1:/i);
+  const m=payload.match(/dronesrs1:/i);          // 相容最舊版前綴
   if(m) payload=payload.slice(m.index+PORT_MAGIC.length);
   payload=payload.replace(/\s+/g,"");
   if(!payload) throw new Error("內容是空的");
+
+  let ver=0;
+  if(payload.startsWith("3.")){ ver=3; payload=payload.slice(2); }
+  else if(payload.startsWith("2.")){ ver=2; payload=payload.slice(2); }
+  else if(payload.startsWith("1.")){ ver=1; payload=payload.slice(2); }
+
+  let bytes;
+  try{ bytes=bytesFromB64(payload); }
+  catch(e){
+    // base64 長度非4倍數＝典型截斷特徵
+    throw new Error(payload.length%4!==0 ? TRUNC_MSG : "不是有效的進度文字");
+  }
+  let json;
+  if(ver>=2){
+    if(typeof DecompressionStream==="undefined")
+      throw new Error("此瀏覽器過舊不支援解壓縮，請改用檔案匯入");
+    try{ json=new TextDecoder().decode(await inflateBytes(bytes)); }
+    catch(e){ throw new Error(TRUNC_MSG); }       // 壓縮流壞掉幾乎必是截斷
+  }else{
+    json=new TextDecoder().decode(bytes);
+  }
   let obj;
-  try{
-    obj=JSON.parse(new TextDecoder().decode(
-      Uint8Array.from(atob(payload), c=>c.charCodeAt(0))));
-  }catch(e){ throw new Error("不是有效的進度文字"); }
-  // 用資料結構驗證：物件、且每筆值都要有 SRS 欄位
+  try{ obj=JSON.parse(json); }
+  catch(e){ throw new Error(/Unexpected end|end of JSON/i.test(String(e.message))? TRUNC_MSG : "不是有效的進度文字"); }
   if(typeof obj!=="object"||obj===null||Array.isArray(obj)) throw new Error("內容不是進度資料");
+
+  // v1/v3 為量化打包、v2 為未量化打包；ver 0（最舊）為完整物件
+  if(ver>=1){
+    const s=unpackStore(obj, ver!==2);
+    if(!s) throw new Error("內容不是進度資料");
+    return s;
+  }
   const vals=Object.values(obj);
   if(vals.length && !vals.every(v=>v&&typeof v==="object"&&("due" in v||"ef" in v)))
     throw new Error("內容不是進度資料");
@@ -545,18 +630,18 @@ function decodeStore(text){
 async function exportProgress(){
   const n=Object.keys(store).length;
   if(!n){ portMsg("目前沒有任何進度可匯出","err"); return; }
-  const text=encodeStore();
+  const text=await encodeStore();
+  const warn = text.length>9000 ? "；文字較長，LINE 可能截斷，建議改用檔案" : "";
   let copied=false;
   try{ await navigator.clipboard.writeText(text); copied=true; }catch(e){}
   if(!copied){
-    // 剪貼簿不可用（http 或舊瀏覽器）→ 打開面板顯示文字讓使用者手動複製
     toggleImportPanel(true);
     document.getElementById("port-text").value=text;
     document.getElementById("port-text").select();
-    portMsg("已產生匯出文字，請手動複製","ok");
+    portMsg("已產生匯出文字（"+text.length+" 字）請手動複製"+warn, warn?"err":"ok");
     return;
   }
-  portMsg(`已複製到剪貼簿（${n} 題紀錄）`,"ok");
+  portMsg(`已複製（${n} 題紀錄，${text.length} 字）`+warn, warn?"err":"ok");
 }
 function exportFile(){
   const n=Object.keys(store).length;
@@ -573,7 +658,7 @@ function exportFile(){
 function importFile(file){
   if(!file) return;
   const r=new FileReader();
-  r.onload=()=>{
+  r.onload=async()=>{
     try{
       let incoming;
       const raw=String(r.result).trim();
@@ -582,7 +667,7 @@ function importFile(file){
         if(obj.magic!=="DRONESRS1"||typeof obj.store!=="object") throw new Error("不是本系統的進度檔");
         incoming=obj.store;
       }else{
-        incoming=decodeStore(raw);   // 也接受存成檔案的文字格式
+        incoming=await decodeStore(raw);   // 也接受存成檔案的文字格式
       }
       applyImport(incoming);
     }catch(e){ portMsg("匯入失敗："+(e.message||e),"err"); }
@@ -606,14 +691,11 @@ function toggleImportPanel(forceOpen){
   p.style.display = open? "" : "none";
   if(open && forceOpen!==true) document.getElementById("port-text").value="";
 }
-function importProgress(){
+async function importProgress(){
   try{
-    applyImport(decodeStore(document.getElementById("port-text").value));
+    applyImport(await decodeStore(document.getElementById("port-text").value));
   }catch(e){
-    const m=String(e.message||e);
-    portMsg(/invalid|JSON|decode/i.test(m)
-      ? "匯入失敗：文字似乎被通訊軟體改動了，請改用「💾 下載進度檔」以檔案傳送"
-      : "匯入失敗："+m, "err");
+    portMsg("匯入失敗："+(e.message||e), "err");
   }
 }
 
