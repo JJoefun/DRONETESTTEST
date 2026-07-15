@@ -102,6 +102,19 @@
   .weakbar button{margin-left:auto;border:1px solid #e2cfa8;background:#fff;color:#8a5a08;
     padding:4px 12px;border-radius:7px;font-size:.75rem;font-weight:700;cursor:pointer}
   #weak-badge{font-family:var(--mono);font-size:.7rem;opacity:.8}
+
+  /* 進度匯出/匯入 */
+  .pbtn{background:none;border:1px solid var(--line);color:var(--faint);border-radius:7px;
+    padding:3px 10px;font-size:.72rem;cursor:pointer;margin:0 3px}
+  .pbtn:hover{color:var(--accent);border-color:var(--accent)}
+  .pmsg{font-family:var(--mono);font-size:.72rem}
+  .pmsg.ok{color:var(--good)} .pmsg.err{color:var(--bad)}
+  #port-panel{max-width:480px;margin:12px auto 0;text-align:left;background:var(--card);
+    border:1px solid var(--line);border-radius:12px;padding:14px 16px;box-shadow:var(--shadow)}
+  #port-panel p{font-size:.78rem;color:var(--muted);margin:.2em 0 .6em}
+  #port-panel textarea{display:block;width:100%;height:96px;padding:9px 11px;border:1px solid var(--line);
+    border-radius:9px;font-size:.72rem;font-family:var(--mono);color:var(--ink);resize:vertical}
+  #port-panel .row{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
   @keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
   @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 
@@ -189,7 +202,18 @@
 
 <footer>
   普通題庫 388 題、專業題庫 588 題，答案均逐題對照官方答案欄。<br>
-  進度自動存於此瀏覽器（localStorage）。更新題庫時覆蓋同一個 index.html，進度即保留。
+  進度自動存於此瀏覽器（localStorage）。更新題庫時覆蓋同一個 index.html，進度即保留。<br>
+  <button class="pbtn" onclick="exportProgress()">📤 匯出進度</button>
+  <button class="pbtn" onclick="toggleImportPanel()">📥 匯入進度</button>
+  <span class="pmsg" id="port-msg"></span>
+  <div id="port-panel" style="display:none">
+    <p>把另一台裝置「匯出」的整段文字貼進來（LINE 傳給自己即可）。匯入採<b>逐題取新合併</b>，不會清掉本機既有紀錄。</p>
+    <textarea id="port-text" placeholder="DRONESRS1:eyJ…"></textarea>
+    <div class="row">
+      <button class="btn" onclick="importProgress()">合併匯入</button>
+      <button class="btn ghost" onclick="toggleImportPanel()">取消</button>
+    </div>
+  </div>
 </footer>
 
 <script>
@@ -468,7 +492,80 @@ function renderBrowse(){
     </details>`).join("");
 }
 
-/* ============ 錯題本 ============ */
+/* ============ 進度匯出 / 匯入（手動同步） ============ */
+const PORT_MAGIC = "DRONESRS1:";
+
+/* 逐題合併：每張卡以 lastSeen（其次 due）較新者為準 */
+function mergeStores(a, b){
+  const out={}, keys={};
+  Object.keys(a).forEach(k=>keys[k]=1);
+  Object.keys(b).forEach(k=>keys[k]=1);
+  Object.keys(keys).forEach(k=>{
+    const x=a[k], y=b[k];
+    if(!x){ out[k]=y; return; }
+    if(!y){ out[k]=x; return; }
+    out[k] = ((y.lastSeen||y.due||0) >= (x.lastSeen||x.due||0)) ? y : x;
+  });
+  return out;
+}
+function portMsg(t, cls){
+  const el=document.getElementById("port-msg");
+  el.textContent=t; el.className="pmsg "+(cls||"");
+  if(t) setTimeout(()=>{ if(el.textContent===t){ el.textContent=""; el.className="pmsg"; } }, 6000);
+}
+/* 匯出：base64(UTF-8 JSON)，前綴魔術字防貼錯 */
+function encodeStore(){
+  const json=JSON.stringify(store);
+  return PORT_MAGIC + btoa(String.fromCharCode(...new TextEncoder().encode(json)));
+}
+function decodeStore(text){
+  text=text.trim();
+  if(!text.startsWith(PORT_MAGIC)) throw new Error("格式不對：開頭應為 "+PORT_MAGIC);
+  const bin=atob(text.slice(PORT_MAGIC.length));
+  const bytes=Uint8Array.from(bin, c=>c.charCodeAt(0));
+  const obj=JSON.parse(new TextDecoder().decode(bytes));
+  if(typeof obj!=="object"||Array.isArray(obj)) throw new Error("內容不是進度資料");
+  return obj;
+}
+async function exportProgress(){
+  const n=Object.keys(store).length;
+  if(!n){ portMsg("目前沒有任何進度可匯出","err"); return; }
+  const text=encodeStore();
+  let copied=false;
+  try{ await navigator.clipboard.writeText(text); copied=true; }catch(e){}
+  if(!copied){
+    // 剪貼簿不可用（http 或舊瀏覽器）→ 打開面板顯示文字讓使用者手動複製
+    toggleImportPanel(true);
+    document.getElementById("port-text").value=text;
+    document.getElementById("port-text").select();
+    portMsg("已產生匯出文字，請手動複製","ok");
+    return;
+  }
+  portMsg(`已複製到剪貼簿（${n} 題紀錄）`,"ok");
+}
+function toggleImportPanel(forceOpen){
+  const p=document.getElementById("port-panel");
+  const open = forceOpen===true ? true : p.style.display==="none";
+  p.style.display = open? "" : "none";
+  if(open && forceOpen!==true) document.getElementById("port-text").value="";
+}
+function importProgress(){
+  const text=document.getElementById("port-text").value;
+  try{
+    const incoming=decodeStore(text);
+    const before=Object.keys(store).length;
+    store=mergeStores(store, incoming);
+    save();
+    const after=Object.keys(store).length;
+    toggleImportPanel();
+    portMsg(`匯入完成：合併 ${Object.keys(incoming).length} 筆，本機 ${before} → ${after} 題`,"ok");
+    refreshHUD(); updateWeakBadge();
+    buildQueue(); nextCard();
+  }catch(e){
+    portMsg("匯入失敗："+(e.message||e),"err");
+  }
+}
+
 function reasonText(id){
   const s=store[id]||{}; const r=[];
   if(s.wrong>0) r.push(`答錯 ${s.wrong} 次`);
