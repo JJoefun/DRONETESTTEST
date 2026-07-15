@@ -84,6 +84,24 @@
   .exp{margin-top:16px;border-left:3px solid var(--accent);background:#f4f8fb;border-radius:0 10px 10px 0;
     padding:12px 15px;font-size:.92rem;color:#2b3d49;animation:fade .18s ease}
   .exp b{color:var(--accent-ink)}
+
+  /* 「不確定/用猜的」標記鈕 */
+  .guess{display:block;width:100%;margin:0 0 11px;border:1.5px dashed var(--line);background:#fff;
+    color:var(--faint);padding:8px 10px;border-radius:10px;font-size:.82rem;font-weight:600;cursor:pointer;transition:.12s}
+  .guess:hover{border-color:var(--warn);color:var(--warn)}
+  .guess[aria-pressed="true"]{border-style:solid;border-color:var(--warn);background:#fdf6e9;color:#8a5a08}
+
+  /* 作答後的累積紀錄 */
+  .rec{margin-top:10px;background:#fdf6e9;border:1px solid #f0dfc0;color:#8a5a08;
+    border-radius:9px;padding:9px 13px;font-size:.82rem;font-family:var(--mono)}
+
+  /* 錯題本 */
+  .why{display:block;font-family:var(--mono);font-size:.7rem;color:var(--warn);font-weight:600;margin-top:3px}
+  .weakbar{display:flex;align-items:center;gap:10px;background:#fdf6e9;border:1px solid #f0dfc0;
+    color:#8a5a08;border-radius:11px;padding:9px 14px;margin-bottom:12px;font-size:.82rem;font-weight:700}
+  .weakbar button{margin-left:auto;border:1px solid #e2cfa8;background:#fff;color:#8a5a08;
+    padding:4px 12px;border-radius:7px;font-size:.75rem;font-weight:700;cursor:pointer}
+  #weak-badge{font-family:var(--mono);font-size:.7rem;opacity:.8}
   @keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
   @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 
@@ -140,6 +158,7 @@
     </div>
     <div class="tabs" role="tablist">
       <button role="tab" aria-selected="true" id="tab-study" onclick="switchTab('study')">複習</button>
+      <button role="tab" aria-selected="false" id="tab-weak" onclick="switchTab('weak')">錯題本 <span id="weak-badge"></span></button>
       <button role="tab" aria-selected="false" id="tab-browse" onclick="switchTab('browse')">題庫瀏覽</button>
     </div>
   </div>
@@ -150,6 +169,13 @@
     <div class="seg" id="study-cat"></div>
     <div class="chips" id="scope-chips"></div>
     <div id="study-area"></div>
+  </div>
+
+  <div id="view-weak" style="display:none">
+    <div class="seg" id="weak-cat"></div>
+    <div id="weak-actions"></div>
+    <div class="stat-note" id="weak-count"></div>
+    <div id="weak-list"></div>
   </div>
 
   <div id="view-browse" style="display:none">
@@ -179,6 +205,18 @@ let store = load(STORE_KEY, {});
 let settings = load(SET_KEY, {cat:"普通", scope:"all", newPerSession:20, browseCat:"普通", browseCh:"all"});
 if(!settings.cat) settings.cat="普通";
 if(!settings.browseCat) settings.browseCat="普通";
+if(!settings.weakCat) settings.weakCat="全部";
+let weakOnly = false;           // 弱點複習模式（不寫入設定，換頁即重置）
+let guessFlag = false;          // 本題是否標記「不確定」
+
+/* 弱點判定：答錯過、標記過不確定，或曾按「再一次」 */
+function isWeak(id){
+  const s = store[id];
+  return !!s && ((s.wrong>0) || (s.guess>0) || (s.lapses>0));
+}
+function weakList(cat){
+  return Q.filter(q => isWeak(q.id) && (cat==="全部" || q.cat===cat));
+}
 function load(k,d){ try{return JSON.parse(localStorage.getItem(k))||d}catch(e){return d} }
 function save(){ localStorage.setItem(STORE_KEY,JSON.stringify(store));
                  localStorage.setItem(SET_KEY,JSON.stringify(settings)); }
@@ -232,11 +270,20 @@ function stats(){
 const h_due=document.getElementById("h-due"), h_new=document.getElementById("h-new"),
       h_seen=document.getElementById("h-seen"), h_acc=document.getElementById("h-acc");
 function refreshHUD(){
+  if(weakOnly){
+    h_due.textContent = queue.length + (session.relearn.length? "+"+session.relearn.length:"");
+    h_new.textContent = "—";
+    h_seen.innerHTML  = session.total + "<small>/本輪</small>";
+    h_acc.textContent = session.total? Math.round(session.right/session.total*100)+"%" : "–";
+    updateWeakBadge();
+    return;
+  }
   const st=stats();
   h_due.textContent = st.due + (session.relearn.length? "+"+session.relearn.length:"");
   h_new.textContent = st.fresh;
   h_seen.innerHTML  = st.seen + "<small>/"+st.total+"</small>";
   h_acc.textContent = session.total? Math.round(session.right/session.total*100)+"%" : "–";
+  updateWeakBadge();
 }
 
 function catRow(el, current, onPick){
@@ -270,6 +317,17 @@ function nextCard(){
   const area=document.getElementById("study-area");
   if(queue.length===0 && session.relearn.length){ queue=session.relearn; session.relearn=[]; }
   if(queue.length===0){
+    if(weakOnly){
+      area.innerHTML = `
+        <div class="state"><div class="big">🎯</div>
+          <h2>弱點複習完成</h2>
+          <p>${session.total? `本輪 ${session.total} 題，正確率 ${Math.round(session.right/session.total*100)}%。`:""}</p>
+          <button class="btn" onclick="switchTab('weak')">回到錯題本</button>
+          <button class="btn ghost" onclick="exitWeakReview()">回到一般複習</button>
+        </div>`;
+      updateWeakBadge();
+      return;
+    }
     const st=stats();
     area.innerHTML = st.total===0 ? "" : `
       <div class="state"><div class="big">✈︎</div>
@@ -280,15 +338,19 @@ function nextCard(){
     return;
   }
   cur=queue.shift();
+  guessFlag=false;
   const s=cardState(cur.id);
-  const badge = s ? (s.relearn?"重新學習":"複習 · 間隔 "+s.iv+"天") : "新題";
+  const badge = s ? (s.relearn?"重新學習":(s.seen?"複習 · 間隔 "+s.iv+"天":"新題")) : "新題";
   area.innerHTML=`
+    ${weakOnly? `<div class="weakbar">🎯 弱點複習中 · 剩 ${queue.length+1} 題
+      <button onclick="exitWeakReview()">結束</button></div>` : ""}
     <div class="card">
       <div class="qmeta">
         <span class="qtag">${cur.cat}｜${cur.ch}-${cur.n} · ${CH_NAMES[cur.ch]} · ${badge}</span>
         <button class="speak" title="朗讀題目" onclick="speak()">🔊</button>
       </div>
       <div class="qtext">${esc(cur.q)}</div>
+      <button class="guess" id="guessBtn" aria-pressed="false" onclick="toggleGuess()">🤔 這題我不確定 / 用猜的</button>
       <div class="opts" id="opts">
         ${cur.opts.map((o,i)=>`<button class="opt" data-l="${LETTERS[i]}" onclick="answer('${LETTERS[i]}')">
           <span class="ltr">${LETTERS[i]}</span><span>${esc(o)}</span></button>`).join("")}
@@ -300,12 +362,24 @@ function answer(letter){
   if(answered) return; answered=true;
   const correct=cur.ans, ok=letter===correct;
   session.total++; if(ok) session.right++;
+  // 記錄弱點資料
+  const s = store[cur.id] || {ef:2.5, iv:0, reps:0, due:Date.now(), lapses:0};
+  s.wrong = s.wrong || 0; s.guess = s.guess || 0;
+  if(!ok){ s.wrong++; s.lastWrong = Date.now(); }
+  if(guessFlag){ s.guess++; }
+  s.lastSeen = Date.now();
+  store[cur.id] = s; save();
   document.querySelectorAll("#opts .opt").forEach(b=>{
     b.disabled=true; const l=b.dataset.l;
     if(l===correct){ b.classList.add("correct"); addMk(b,"✓ 正解"); }
     if(l===letter && !ok){ b.classList.add("wrong"); addMk(b,"✕ 你選的"); }
   });
-  const expHtml=`<div class="exp"><b>解析</b>　${esc(cur.exp)}</div>`;
+  const rec=[];
+  if(s.wrong>0) rec.push(`答錯 ${s.wrong} 次`);
+  if(s.guess>0) rec.push(`猜過 ${s.guess} 次`);
+  if(s.lapses>0) rec.push(`重學 ${s.lapses} 次`);
+  const recHtml = rec.length ? `<div class="rec">📌 這題累積紀錄：${rec.join("　·　")}　（已在錯題本）</div>` : "";
+  const expHtml=`<div class="exp"><b>解析</b>　${esc(cur.exp)}</div>`+recHtml;
   const grades=`
     <div class="grades">
       <button class="grade g-again" onclick="grade('again')">再一次<small>&lt;10分</small></button>
@@ -316,6 +390,11 @@ function answer(letter){
     <div class="hint">鍵盤：1 再一次 · 2 困難 · 3 良好 · 4 簡單${ok?"":"　（答錯建議「再一次」）"}</div>`;
   document.getElementById("post").innerHTML=expHtml+grades;
   refreshHUD();
+}
+function toggleGuess(){
+  if(answered) return;
+  guessFlag=!guessFlag;
+  document.getElementById("guessBtn").setAttribute("aria-pressed", guessFlag);
 }
 function addMk(b,txt){ const s=document.createElement("span"); s.className="mk"; s.textContent=txt; b.appendChild(s); }
 function prevIv(g){
@@ -366,17 +445,87 @@ function renderBrowse(){
     </details>`).join("");
 }
 
+/* ============ 錯題本 ============ */
+function reasonText(id){
+  const s=store[id]||{}; const r=[];
+  if(s.wrong>0) r.push(`答錯 ${s.wrong} 次`);
+  if(s.guess>0) r.push(`猜過 ${s.guess} 次`);
+  if(s.lapses>0) r.push(`重學 ${s.lapses} 次`);
+  return r.join("　·　");
+}
+function weakScore(id){   // 排序用：越弱分數越高
+  const s=store[id]||{};
+  return (s.wrong||0)*3 + (s.guess||0)*2 + (s.lapses||0);
+}
+function updateWeakBadge(){
+  const n=weakList("全部").length;
+  document.getElementById("weak-badge").textContent = n? `(${n})` : "";
+}
+function renderWeak(){
+  const catsAll=["全部",...CATS];
+  const el=document.getElementById("weak-cat");
+  el.innerHTML=catsAll.map(c=>{
+    const n=weakList(c).length;
+    return `<button aria-pressed="${settings.weakCat===c}" data-c="${c}">${c==="全部"?"全部":c}<span class="c">${n}</span></button>`;
+  }).join("");
+  el.querySelectorAll("button").forEach(b=> b.onclick=()=>{ settings.weakCat=b.dataset.c; save(); renderWeak(); });
+
+  let list=weakList(settings.weakCat);
+  list.sort((a,b)=> weakScore(b.id)-weakScore(a.id) || a.ch-b.ch || a.n-b.n);
+  document.getElementById("weak-count").textContent = list.length? `共 ${list.length} 題　（依弱點程度排序）` : "";
+  document.getElementById("weak-actions").innerHTML = list.length
+    ? `<button class="btn" style="margin:0 0 14px" onclick="startWeakReview()">▶︎ 只複習這 ${list.length} 題</button>`
+    : "";
+  document.getElementById("weak-list").innerHTML = list.length ? list.map(q=>`
+    <details class="qrow">
+      <summary><span class="id">${q.cat==="專業"?"專":"普"} ${q.ch}-${q.n}</span>
+        <span>${esc(q.q)}<span class="why">${reasonText(q.id)}</span></span></summary>
+      <div class="qbody">
+        ${q.opts.map((o,i)=>`<div class="o ${LETTERS[i]===q.ans?'correct':''}">
+          <span class="ltr">${LETTERS[i]}</span><span>${esc(o)}${LETTERS[i]===q.ans?'　✓':''}</span></div>`).join("")}
+        <div class="exp"><b>解析</b>　${esc(q.exp)}</div>
+      </div>
+    </details>`).join("")
+    : `<div class="state"><div class="big">✓</div><h2>錯題本目前是空的</h2>
+       <p>答錯的題，或你標記「不確定 / 用猜的」的題，都會自動收進這裡。</p></div>`;
+  updateWeakBadge();
+}
+function startWeakReview(){
+  const list=weakList(settings.weakCat);
+  if(!list.length) return;
+  weakOnly=true;
+  queue=[...list].sort((a,b)=> weakScore(b.id)-weakScore(a.id));
+  session={right:0,total:0,relearn:[]};
+  showTab("study");
+  document.getElementById("study-cat").style.display="none";
+  document.getElementById("scope-chips").style.display="none";
+  nextCard();
+}
+function exitWeakReview(){
+  weakOnly=false;
+  document.getElementById("study-cat").style.display="";
+  document.getElementById("scope-chips").style.display="";
+  startStudy();
+}
+
+function showTab(t){
+  document.getElementById("view-study").style.display  = t==="study"?"":"none";
+  document.getElementById("view-weak").style.display   = t==="weak"?"":"none";
+  document.getElementById("view-browse").style.display = t==="browse"?"":"none";
+  document.getElementById("tab-study").setAttribute("aria-selected", t==="study");
+  document.getElementById("tab-weak").setAttribute("aria-selected", t==="weak");
+  document.getElementById("tab-browse").setAttribute("aria-selected", t==="browse");
+}
 function switchTab(t){
-  const study=t==="study";
-  document.getElementById("view-study").style.display=study?"":"none";
-  document.getElementById("view-browse").style.display=study?"none":"";
-  document.getElementById("tab-study").setAttribute("aria-selected",study);
-  document.getElementById("tab-browse").setAttribute("aria-selected",!study);
-  if(study){ startStudy(); } else { renderBrowse(); }
+  showTab(t);
+  if(t==="study"){ if(weakOnly) exitWeakReview(); else startStudy(); }
+  else if(t==="weak"){ renderWeak(); }
+  else { renderBrowse(); }
 }
 function esc(s){ return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 
 startStudy();
+updateWeakBadge();
 </script>
 </body>
 </html>
